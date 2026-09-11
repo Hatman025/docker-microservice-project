@@ -1,58 +1,10 @@
-name: Microservices Trigger CI
+Hi lawrence so i have removed the content,kindly try to writ th trigger.yaml worklows file,when we meet i will write it and we will look at it extensively
 
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - "src/**"
-
-permissions:
-  contents: read
-  packages: write
-
-jobs:
-  # -------------------------------
-  # Job 1: Detect changed services
-  # -------------------------------
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      services: ${{ steps.changed.outputs.services }}
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed services
-        id: changed
-        run: |
-          SERVICES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
-            | grep '^src/' \
-            | cut -d'/' -f2 \
-            | sort -u \
-            | jq -R -s -c 'split("\n")[:-1]')
-
-          echo "Detected services: $SERVICES"
-          echo "services=$SERVICES" >> $GITHUB_OUTPUT
+#mkdir my-repo && cd my-repo   # or cd into an existing empty folder you want to use
+#git init
+#git remote add origin https://github.com/onartey/test-repo/edit/main/.github/workflows/ci-trigger.yaml
+#git sparse-checkout init --cone
+#git sparse-checkout set src
+#git pull origin main#
 
 
-  # --------------------------------------------------
-  # Job 2: Call reusable workflow (matrix per service)
-  # --------------------------------------------------
-  build-and-push:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.services != '[]'
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
-
-    # 🚨 IMPORTANT:
-    # Reusable workflows are called at JOB level
-    uses: ./.github/workflows/microservice-ci.yaml
-
-    with:
-      service: ${{ matrix.service }}
