@@ -1,3 +1,181 @@
+# Hands-On DevSecOps Lab: Docker Build Caching & GitHub Container Registry (GHCR)
+
+| | |
+|---|---|
+| **Difficulty** | Intermediate |
+| **Topic** | Docker Layer Caching + GitHub Container Registry (GHCR) |
+| **Estimated Time** | 45–60 minutes |
+| **Builds On** | *Step Outputs vs Job Outputs* lab |
+
+---
+
+## 1. Objective
+
+By the end of this lab, you should be able to:
+
+1. Understand what a **Docker layer** is, and why rebuilding an image from scratch every time is wasteful.
+2. Use `docker/build-push-action` with the **GitHub Actions cache backend** (`type=gha`) to cache Docker build layers between workflow runs.
+3. Tell the difference between **`cache-from`** and **`cache-to`**, and why you need both.
+4. Authenticate to GitHub Container Registry (GHCR) using the built-in `GITHUB_TOKEN`.
+5. Build and push a Docker image, tagged using an output from a previous job.
+6. Understand the difference between:
+   - **Docker layer caching** — speeding up the *build itself* by reusing unchanged layers
+   - **A registry** — a permanent, versioned storage location for the *finished image*
+7. Chain job outputs across three jobs to keep one consistent image tag from build to publish.
+
+---
+
+## 2. Scenario
+
+You are still working as a DevSecOps Engineer, extending the pipeline from the previous lab.
+
+Right now your pipeline looks like this:
+
+```
+BUILD
+  ↓
+SECURITY
+```
+
+Your team has two new problems:
+
+1. **The Docker build is slow.** Every run rebuilds every single layer of the image from scratch — even the layers that didn't change (like installing OS packages or dependencies). Your team lead wants Docker's own **layer cache** reused between runs.
+2. **The built image goes nowhere.** Right now the pipeline only *simulates* a build and a scan — no image is actually built or stored. Your team wants the image **built and pushed to GitHub Container Registry (GHCR)** once it passes the security scan.
+
+Your pipeline must become:
+
+```
+BUILD (Docker image, with layer caching)
+  ↓
+SECURITY
+  ↓
+PUBLISH (push to GHCR)
+```
+
+---
+
+## 3. What You Need to Build
+
+```
+┌───────────────────────────────┐
+│           BUILD JOB            │
+│                                 │
+│ Step 1: Build image              │
+│  (restore cached layers,         │
+│   save new/changed layers)       │
+│          ↓                      │
+│ Step 2: Generate Image Tag      │
+└────────────┬────────────────────┘
+             │ image_tag (job output)
+             ▼
+┌───────────────────────────────┐
+│         SECURITY JOB           │
+│                                 │
+│ Receive image_tag               │
+│          ↓                      │
+│ Scan image                      │
+│          ↓                      │
+│ Output: scan_result = PASS      │
+└────────────┬────────────────────┘
+             │ image_tag + scan_result
+             ▼
+┌───────────────────────────────┐
+│         PUBLISH JOB            │
+│                                 │
+│ Login to GHCR                   │
+│          ↓                      │
+│ Build & tag image (cache hit)   │
+│          ↓                      │
+│ Push image to GHCR               │
+└───────────────────────────────┘
+```
+
+---
+
+## 4. Requirements
+
+Create (or extend) this file:
+
+```
+.github/workflows/docker-cache-ghcr-lab.yml
+```
+
+Your workflow must contain **three** jobs:
+
+- **Job 1:** `build` — builds the Docker image using layer caching, produces `image_tag`
+- **Job 2:** `security` — depends on `build`, simulates a scan, produces `scan_result`
+- **Job 3:** `publish` — depends on `build` and `security`, rebuilds (cache-hit, so it's fast) and pushes the image to GHCR, but **only if `scan_result == PASS`**
+
+For the task-by-task walkthrough, see [`STEP-BY-STEP-GUIDE.md`](./STEP-BY-STEP-GUIDE.md).
+
+---
+
+## 5. Two New Concepts, In Plain Terms
+
+### Docker Layer Caching
+
+Every instruction in a `Dockerfile` (`FROM`, `RUN`, `COPY`, etc.) creates a **layer**. Docker normally caches layers *locally on one machine* — but GitHub Actions gives you a fresh, empty machine on every run, so that local cache never survives between runs unless you explicitly store and restore it.
+
+`docker/build-push-action` can do this for you with two options:
+
+- **`cache-from`** — where to look for existing layers before building (the source to restore from)
+- **`cache-to`** — where to save this run's layers afterward (the destination to write to)
+
+Using `type=gha` tells both options to use **GitHub Actions' own cache storage** — no extra registry or secret needed.
+
+```yaml
+cache-from: type=gha
+cache-to: type=gha,mode=max
+```
+
+`mode=max` caches **every** layer, including intermediate build stages — not just the final image layers. This matters most in multi-stage Dockerfiles.
+
+### GitHub Container Registry (GHCR)
+
+A **registry** is the opposite of a cache: it is a **permanent, versioned, pullable** storage location for the finished container image. Once you push `ghcr.io/<owner>/<repo>:app-v1.0`, that exact image can be pulled by anyone with access, today or a year from now.
+
+| | Docker Layer Cache | Registry (GHCR) |
+|---|---|---|
+| Purpose | Speed up the **build step** | Store and distribute the **finished image** |
+| Lifetime | Temporary, can be evicted | Permanent until deleted |
+| What's stored | Intermediate build layers | The final, tagged image |
+| Who uses it | The workflow itself, next time it builds | Humans, deployments, other pipelines |
+| Example | `cache-from: type=gha` | `ghcr.io/org/app:v1.0` |
+
+---
+
+## 6. Expected Result
+
+When the workflow runs successfully, you should see something like:
+
+```
+Restoring cached layers from GitHub Actions cache...
+[+] Building 4.2s (12/12) FINISHED
+ => CACHED [2/5] RUN apt-get update && apt-get install -y curl
+ => CACHED [3/5] COPY package*.json ./
+ => [4/5] RUN npm ci
+The image is app:v1.0
+Scanning image: app:v1.0
+Scan result: PASS
+Logging in to ghcr.io...
+Building app:v1.0 (cache hit — fast rebuild)...
+Pushing ghcr.io/<owner>/<repo>:app-v1.0...
+Image pushed successfully
+```
+
+The lines starting with `CACHED` are the whole point of this lab — they show layers that were **restored, not rebuilt**. The image tag created in `build` should be the exact same tag used all the way through to the GHCR push, reinforcing the job-output chaining from the previous lab.
+
+---
+
+## 7. DevSecOps Extension
+
+Once the basic lab works, modify it further:
+
+1. Change one line in your `Dockerfile` (e.g. add a new `RUN` command near the end) and re-run the workflow. Compare which layers say `CACHED` vs which get rebuilt — this teaches you **layer ordering**: put things that change often (your app code) *after* things that rarely change (OS packages, dependencies).
+2. Add a **second tag** when pushing to GHCR: also push `:latest` alongside `:app-v1.0`, but only on the `main` branch.
+3. Make the `publish` job conditional using `if:` so it only runs when `needs.security.outputs.scan_result == 'PASS'` — this is your first real **security gate**.
+
+This is the natural next step after the previous lab: you now have a full pipeline where **layer caching makes builds fast**, and **GHCR makes the result durable**.
 # Hands-On DevSecOps Lab: GitHub Actions — Step Outputs vs Job Outputs
 
 | | |
