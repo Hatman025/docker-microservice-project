@@ -4,7 +4,7 @@
 |---|---|
 | **Difficulty** | Intermediate |
 | **Topic** | Docker Layer Caching + GitHub Container Registry (GHCR) |
-| **Estimated Time** | 45–60 minutes |
+| **Estimated Time** | 20–25 minutes |
 | **Builds On** | *Step Outputs vs Job Outputs* lab |
 
 ---
