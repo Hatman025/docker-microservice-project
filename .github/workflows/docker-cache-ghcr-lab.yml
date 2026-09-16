@@ -7,42 +7,18 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
 
-  # -----------------------------------------
-  # JOB 1: Discover services under src/*
-  # -----------------------------------------
-  discover:
-    runs-on: ubuntu-latest
-    outputs:
-      services: ${{ steps.list.outputs.services }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: List services
-        id: list
-        run: |
-          SERVICES=$(find src -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-            | sort \
-            | jq -R -s -c 'split("\n")[:-1]')
-          echo "Services: $SERVICES"
-          echo "services=$SERVICES" >> "$GITHUB_OUTPUT"
-
-  # -----------------------------------------
-  # JOB 2: Build (with layer caching), one per service
-  # -----------------------------------------
+  # =================================
+  # JOB 1: BUILD (with layer caching)
+  # =================================
   build:
-    needs: discover
-    if: needs.discover.outputs.services != '[]'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        service: ${{ fromJson(needs.discover.outputs.services) }}
+    # Expose the step output as a job output so other jobs can read it
     outputs:
-      image_name: ${{ env.IMAGE_NAME }}
+      image_tag: ${{ steps.generate.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -50,74 +26,50 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Resolve build context
-        id: ctx
-        run: |
-          # cartservice's Dockerfile and .csproj live one level deeper
-          # than the rest of the services (src/cartservice/src), so it
-          # needs its own build context.
-          if [ "${{ matrix.service }}" = "cartservice" ]; then
-            echo "context=src/cartservice/src" >> "$GITHUB_OUTPUT"
-          else
-            echo "context=src/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Generate image name (lowercase, GHCR requires it)
+      - name: Generate Image Tag
         id: generate
-        run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "image_name=${{ env.REGISTRY }}/${REPO_LC}/${{ matrix.service }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: echo "image_tag=app:v1.0" >> "$GITHUB_OUTPUT"
 
       - name: Build image (restore + save layer cache)
         uses: docker/build-push-action@v6
         with:
-          context: ${{ steps.ctx.outputs.context }}
+          context: .
           push: false
           load: true
-          tags: ${{ steps.generate.outputs.image_name }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          tags: ${{ steps.generate.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Save image name for later jobs
-        run: echo "${{ matrix.service }}=${{ steps.generate.outputs.image_name }}" >> image-names.txt
+      - name: Display Image Tag
+        run: echo "The image is ${{ steps.generate.outputs.image_tag }}"
 
-      - name: Upload image name artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-name-${{ matrix.service }}
-          path: image-names.txt
-          retention-days: 1
-
-  # -----------------------------------------
-  # JOB 3: Security scan, one per service
-  # -----------------------------------------
+  # =================================
+  # JOB 2: SECURITY
+  # =================================
   security:
     needs: build
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        service: ${{ fromJson(needs.discover.outputs.services) }}
+    # Expose this job's scan result as a job output for the publish job
+    outputs:
+      scan_result: ${{ steps.scan.outputs.scan_result }}
     steps:
-      - name: Placeholder scan
-        run: |
-          echo "Scanning ${{ matrix.service }}"
-          echo "scan_result=PASS" >> "$GITHUB_OUTPUT"
+      - name: Security Scan
         id: scan
+        run: |
+          echo "Scanning image: ${{ needs.build.outputs.image_tag }}"
+          echo "scan_result=PASS" >> "$GITHUB_OUTPUT"
 
-  # -----------------------------------------
-  # JOB 4: Publish (security gate), one per service
-  # -----------------------------------------
+  # =================================
+  # JOB 3: PUBLISH (security gate)
+  # =================================
   publish:
-    needs: [discover, build, security]
+    needs: [build, security]
+    # Job-level gate: only run publish if security's job output was PASS
+    if: needs.security.outputs.scan_result == 'PASS'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        service: ${{ fromJson(needs.discover.outputs.services) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -125,20 +77,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Resolve build context
-        id: ctx
-        run: |
-          if [ "${{ matrix.service }}" = "cartservice" ]; then
-            echo "context=src/cartservice/src" >> "$GITHUB_OUTPUT"
-          else
-            echo "context=src/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Generate image name (lowercase, GHCR requires it)
-        id: generate
-        run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "image_name=${{ env.REGISTRY }}/${REPO_LC}/${{ matrix.service }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Lowercase image name (GHCR requires lowercase)
+        run: echo "IMAGE_NAME_LC=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -150,8 +90,8 @@ jobs:
       - name: Build & push image to GHCR (cache hit = fast rebuild)
         uses: docker/build-push-action@v6
         with:
-          context: ${{ steps.ctx.outputs.context }}
+          context: .
           push: true
-          tags: ${{ steps.generate.outputs.image_name }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ needs.build.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
