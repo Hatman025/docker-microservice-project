@@ -1,0 +1,5 @@
+src/
+.git/
+.github/
+LICENSE
+kustomization.yaml
